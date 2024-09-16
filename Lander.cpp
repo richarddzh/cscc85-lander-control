@@ -184,7 +184,7 @@ double Velocity_Y_robust(void);
 double Angle_robust(void);
 bool NearLanding(double pos_x, double pos_y);
 bool Rotate_robust(double angle, double pos_x, double pos_y);
-void Thruster_robust(double xPower, double yPower, const char *name);
+void Thruster_robust(double targetVx, double targetVy, double vx, double vy, const char *name);
 
 
 double GetMeanAndError(SampleFunc sampelFunc, double *stdErr, const char *name)
@@ -301,74 +301,66 @@ bool Rotate_robust(double angle, double pos_x, double pos_y)
  return false;
 }
 
-void Thruster_robust(double xPower, double yPower, const char *name)
+void Thruster_robust(double targetVx, double targetVy, double vx, double vy, const char *name)
 {
- printf("%s: xPower=%.2f,yPower=%.2f\n", name, xPower, yPower);
- double ratioM = 1.0;
- double ratioL = 1.0;
- double ratioR = 1.0;
- if (yPower <= 0)
+ double delVx = targetVx - vx;
+ double delVy = targetVy - vy;
+ // Calculate the acceleration vector.
+ // By default, make it in the direction upwards from -45 to 45 degrees.
+ switch (Control_Fail_Mode)
  {
-  ratioM = G_ACCEL / MT_ACCEL / sqrt(0.5);
-  ratioL = G_ACCEL / LT_ACCEL / sqrt(0.5);
-  ratioR = G_ACCEL / RT_ACCEL / sqrt(0.5);
+  default:
+  {
+   double absV = sqrt(delVx*delVx + delVy*delVy);
+   if (absV >= G_ACCEL * sqrt(0.5)) {
+    double ratio = G_ACCEL * sqrt(0.5) / absV;
+    delVx *= ratio;
+    delVy *= ratio;
+   }
+   delVy += G_ACCEL;
+   break;
+  }
  }
+ printf("%s: delVx=%.2f,delVy=%.2f,targetVx-vx=%.2f,targetVy-vy=%.2f\n",
+  name, delVx, delVy, targetVx-vx, targetVy-vy);
+ double powerMain = 0;
+ double powerLeft = 0;
+ double powerRight = 0;
+ double accel = 1;
  switch (Control_Fail_Mode)
  {
   case LT_FAIL_ONLY:
   {
-   if (yPower > 0) {
-    ratioM = 1.0 * RT_ACCEL / MT_ACCEL;
-   }
-   if (xPower > 0) {
-    Main_Thruster(xPower * ratioM);
-    Right_Thruster(0);
-   } else if (xPower < 0) {
-    Right_Thruster(-xPower * ratioR);
-    Main_Thruster(0);
-   } else if (yPower > 0) {
-    Main_Thruster(yPower / (MT_ACCEL+RT_ACCEL) * RT_ACCEL);
-    Right_Thruster(yPower / (MT_ACCEL+RT_ACCEL) * MT_ACCEL);
-   } else {
-    Main_Thruster(0);
-    Right_Thruster(0);
-   }
-   return;
+   powerMain = fmax(delVx+delVy, 0)/sqrt(2)/MT_ACCEL*accel;
+   powerRight = fmax(delVy-delVx, 0)/sqrt(2)/RT_ACCEL*accel;
+   break;
   }
   case RT_FAIL_ONLY:
   {
-   if (yPower > 0) {
-    ratioM = 1.0 * LT_ACCEL / MT_ACCEL;
-   }
-   if (xPower > 0) {
-    Main_Thruster(0);
-    Left_Thruster(xPower * ratioL);
-   } else if (xPower < 0) {
-    Left_Thruster(0);
-    Main_Thruster(-xPower * ratioM);
-   } else if (yPower > 0) {
-    Main_Thruster(yPower / (MT_ACCEL+LT_ACCEL) * LT_ACCEL);
-    Left_Thruster(yPower / (MT_ACCEL+LT_ACCEL) * MT_ACCEL);
-   } else {
-    Main_Thruster(0);
-    Left_Thruster(0);
-   }
-   return;
+   powerMain = fmax(delVy-delVx, 0)/sqrt(2)/MT_ACCEL*accel;
+   powerLeft = fmax(delVx+delVy, 0)/sqrt(2)/LT_ACCEL*accel;
+   break;
   }
   default:
   {
-   if (xPower > 0) {
-    Left_Thruster(xPower);
-    Right_Thruster(0);
-   } else {
-    Left_Thruster(0);
-    Right_Thruster(-xPower);
-   }
-   if (yPower > 0) Main_Thruster(yPower);
-   else Main_Thruster(0);
-   return;
+   powerMain = fmax(delVy, 0)/MT_ACCEL*accel;
+   if (delVx > 0) powerLeft = fmax(delVx, 0)/LT_ACCEL*accel;
+   else powerRight = fmax(-delVx, 0)/RT_ACCEL*accel;
+   break;
   }
  }
+ double normalizeRatio = fmax(powerMain/MT_ACCEL,
+  fmax(powerLeft/LT_ACCEL, powerRight/RT_ACCEL));
+ if (normalizeRatio > 1) {
+  powerMain /= normalizeRatio;
+  powerLeft /= normalizeRatio;
+  powerRight /= normalizeRatio;
+ }
+ printf("%s: powerMain=%.2f,powerLeft=%.2f,powerRight=%.2f\n",
+  name, powerMain, powerLeft, powerRight);
+ Main_Thruster(powerMain);
+ Left_Thruster(powerLeft);
+ Right_Thruster(powerRight);
 }
 
 void Lander_Control(void)
@@ -439,20 +431,30 @@ void Lander_Control(void)
  double vel_x = Velocity_X_robust();
  double vel_y = Velocity_Y_robust();
  double angle = Angle_robust();
+ double distX = fabs(PLAT_X - pos_x);
+ double distY = fabs(PLAT_Y - pos_y);
+ if (distX > 200) {
+  VXlim = 30;
+  VYlim = 0;
+ } else if (distX > 50) {
+  VXlim = 15;
+ } else if (distX < 5) {
+  VXlim = 0;
+ } else {
+  VXlim = 5;
+ }
+ if (distX < 200) {
+  if (distY > 200) {
+   VYlim = -20;
+  } else if (distY > 40) {
+   VYlim = -10;
+  } else {
+   VYlim = -4;
+  }
+ }
 
- printf("Robust: X=%.2f,Y=%.2f,Vx=%.2f,Vy=%.2f,Angle=%.2f\n",
-  pos_x, pos_y, vel_x, vel_y, angle);
-
- if (fabs(pos_x-PLAT_X)>200) VXlim=25;
- else if (fabs(pos_x-PLAT_X)>100) VXlim=15;
- else VXlim=5;
-
- if (PLAT_Y-pos_y>200) VYlim=-20;
- else if (PLAT_Y-pos_y>100) VYlim=-10;  // These are negative because they
- else VYlim=-4;				       // limit descent velocity
-
- // Ensure we will be OVER the platform when we land
- if (fabs(PLAT_X-pos_x)/fabs(vel_x)>1.25*fabs(PLAT_Y-pos_y)/fabs(vel_y)) VYlim=0;
+ printf("Robust: X=%.2f,Y=%.2f,Vx=%.2f,Vy=%.2f,Angle=%.2f,VXlim=%.2f,VYlim=%.2f\n",
+  pos_x, pos_y, vel_x, vel_y, angle, VXlim, VYlim);
 
  // IMPORTANT NOTE: The code below assumes all components working
  // properly. IT MAY OR MAY NOT BE USEFUL TO YOU when components
@@ -473,37 +475,17 @@ void Lander_Control(void)
 
  // Module is oriented properly, check for horizontal position
  // and set thrusters appropriately.
- double xPower = 0;
- double yPower = 0;
+ double targetVx = 0;
  if (pos_x>PLAT_X)
  {
-  // Lander is to the LEFT of the landing platform, use Right thrusters to move
-  // lander to the left.
-  if (vel_x>(-VXlim)) xPower = -((VXlim+fmin(0,vel_x))/VXlim);
-  else
-  {
-   // Exceeded velocity limit, brake
-   // xPower = (fabs(VXlim-vel_x));
-   xPower = 1.0;
-  }
+  targetVx = -VXlim;
  }
  else
  {
-  // Lander is to the RIGHT of the landing platform, opposite from above
-  if (vel_x<VXlim) xPower = ((VXlim-fmax(0,vel_x))/VXlim);
-  else
-  {
-   // xPower = -(fabs(VXlim-vel_x));
-   xPower = -1.0;
-  }
+  targetVx = VXlim;
  }
 
- // Vertical adjustments. Basically, keep the module below the limit for
- // vertical velocity and allow for continuous descent. We trust
- // Safety_Override() to save us from crashing with the ground.
- if (vel_y<VYlim) yPower = (1.0);
- else yPower = (0);
- Thruster_robust(xPower, yPower, "Lander_Control");
+ Thruster_robust(targetVx, VYlim, vel_x, vel_y, "Lander_Control");
 }
 
 void Safety_Override(void)
@@ -545,8 +527,8 @@ void Safety_Override(void)
  double vel_x = Velocity_X_robust();
  double vel_y = Velocity_Y_robust();
  double angle = Angle_robust();
- double xPower = 0;
- double yPower = 0;
+ double targetVx = 0;
+ double targetVy = 0;
 
  // Establish distance threshold based on lander
  // speed (we need more time to rectify direction
@@ -554,7 +536,7 @@ void Safety_Override(void)
  Vmag=vel_x*vel_x;
  Vmag+=vel_y*vel_y;
 
- DistLimit=fmax(75,Vmag);
+ DistLimit=fmax(50,Vmag);
 
  // If we're close to the landing platform, disable
  // safety override (close to the landing platform
@@ -562,83 +544,37 @@ void Safety_Override(void)
  // safely land the craft)
  if (fabs(PLAT_X-pos_x)<150&&fabs(PLAT_Y-pos_y)<150) return;
 
- // Determine the closest surfaces in the direction
- // of motion. This is done by checking the sonar
- // array in the quadrant corresponding to the
- // ship's motion direction to find the entry
- // with the smallest registered distance
- printf("SONAR_DIST: ");
+ // Sum up the sonar reading vectors to determine
+ // the direct to move away from the obstacle.
+ double sumX = 0;
+ double sumY = 0;
  for (int i = 0; i < 36; i++)
  {
-  printf("%.2f ", SONAR_DIST[i]);
+  double alpha = i * M_PI / 18;
+  double dist = SONAR_DIST[i];
+  if (dist < 0 || dist > DistLimit) continue;
+  sumX -= sin(alpha)/fmax(1, dist)/fmax(1,dist)*DistLimit*DistLimit;
+  sumY -= cos(alpha)/fmax(1, dist)/fmax(1,dist)*DistLimit*DistLimit;
  }
- printf("\n");
  
- // Horizontal direction.
- dmin=1000000;
- if (vel_x>0)
+ if (pos_y < fmin(DistLimit/2,60))
  {
-  for (int i=5;i<14;i++)
-   if (SONAR_DIST[i]>-1&&SONAR_DIST[i]<dmin) dmin=SONAR_DIST[i];
+  sumY = 0;
  }
- else
+ else if (pos_y < fmin(DistLimit/4,30))
  {
-  for (int i=22;i<32;i++)
-   if (SONAR_DIST[i]>-1&&SONAR_DIST[i]<dmin) dmin=SONAR_DIST[i];
- }
- // Determine whether we're too close for comfort. There is a reason
- // to have this distance limit modulated by horizontal speed...
- // what is it?
- double threshold = DistLimit*fmax(.25,fmin(fabs(vel_x)/5.0,1));
- printf("DistLimit=%.2f,dmin=%.2f,vel_x=%.2f,threshold=%.2f\n",
-  DistLimit, dmin, vel_x, threshold);
- if (dmin<DistLimit*fmax(.25,fmin(fabs(vel_x)/5.0,1)))
- { // Too close to a surface in the horizontal direction
-  if (Rotate_robust(angle, pos_x, pos_y))
-  {
-   return;
-  }
-
-  if (vel_x>0){
-   xPower = -1.0;
-  }
-  else
-  {
-   xPower = 1.0;
-  }
+  sumY = -G_ACCEL;
  }
 
- // Vertical direction
- dmin=1000000;
- if (vel_y>5)      // Mind this! there is a reason for it...
+ printf("Safety_Override: sumX=%.2f,sumY=%.2f,DistLimit=%.2f\n", sumX, sumY, DistLimit);
+ if (sumX != 0 || sumY != 0)
  {
-  for (int i=0; i<5; i++)
-   if (SONAR_DIST[i]>-1&&SONAR_DIST[i]<dmin) dmin=SONAR_DIST[i];
-  for (int i=32; i<36; i++)
-   if (SONAR_DIST[i]>-1&&SONAR_DIST[i]<dmin) dmin=SONAR_DIST[i];
- }
- else
- {
-  for (int i=14; i<22; i++)
-   if (SONAR_DIST[i]>-1&&SONAR_DIST[i]<dmin) dmin=SONAR_DIST[i];
- }
- if (dmin<DistLimit)   // Too close to a surface in the horizontal direction
- {
-  if (Rotate_robust(angle, pos_x, pos_y))
-  {
-   return;
-  }
-  if (vel_y>2.0){
-   yPower = 0;
-  }
-  else
-  {
-   yPower = 1.0;
-  }
+  targetVx = sumX;
+  targetVy = sumY;
  }
 
- if (xPower != 0 || yPower != 0)
+ if (targetVx != 0 || targetVy != 0)
  {
-  Thruster_robust(xPower, yPower, "Safety_Override");
+  Thruster_robust(targetVx, targetVy, vel_x, vel_y, "Safety_Override");
  }
 }
