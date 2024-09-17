@@ -175,6 +175,10 @@ const int SensorSampleCount = 100;
 const int ErrorSampleCount = 20;
 const double PosNoiseThreshold = 40;
 const double VelNoiseThreshold = 1;
+const double X_MIN = 0;
+const double X_MAX = 1024;
+const double Y_MIN = 0;
+const double Y_MAX = 1024;
 typedef double (*SampleFunc)();
 double GetMeanAndError(SampleFunc sampelFunc, double *stdErr, const char *name);
 double Position_X_robust(void);
@@ -185,7 +189,14 @@ double Angle_robust(void);
 bool NearLanding(double pos_x, double pos_y);
 bool Rotate_robust(double angle, double pos_x, double pos_y);
 void Thruster_robust(double targetVx, double targetVy, double vx, double vy, const char *name);
+double fmin_Dist(double x, double y);
 
+double fmin_Dist(double x, double y)
+{
+ if (x < 0) return y;
+ if (y < 0) return x;
+ return fmin(x, y);
+}
 
 double GetMeanAndError(SampleFunc sampelFunc, double *stdErr, const char *name)
 {
@@ -552,18 +563,25 @@ void Safety_Override(void)
  {
   double alpha = i * M_PI / 18;
   double dist = SONAR_DIST[i];
+  if (i < 3 || i > 33) dist = fmin_Dist(dist, (pos_y-Y_MIN)/cos(alpha));
+  if (i > 6 && i < 12) dist = fmin_Dist(dist, (X_MAX-pos_x)/sin(alpha));
+  if (i > 15 && i < 21) dist = fmin_Dist(dist, (Y_MAX-pos_y)/cos(alpha-M_PI));
+  if (i > 24 && i < 30) dist = fmin_Dist(dist, (pos_x-X_MIN)/sin(alpha-M_PI));
   if (dist < 0 || dist > DistLimit) continue;
   sumX -= sin(alpha)/fmax(1, dist)/fmax(1,dist)*DistLimit*DistLimit;
   sumY -= cos(alpha)/fmax(1, dist)/fmax(1,dist)*DistLimit*DistLimit;
+  if ((i == 9 || i == 27) && (dist < 0 || dist > DistLimit)) {
+    sumX += (PLAT_X - pos_x) / 50;
+  }
  }
  
  if (pos_y < fmin(DistLimit/2,60))
  {
-  sumY = 0;
+  sumY = fmin(0, sumY);
  }
  else if (pos_y < fmin(DistLimit/4,30))
  {
-  sumY = -G_ACCEL;
+  sumY = fmin(-G_ACCEL, sumY);
  }
 
  printf("Safety_Override: sumX=%.2f,sumY=%.2f,DistLimit=%.2f\n", sumX, sumY, DistLimit);
